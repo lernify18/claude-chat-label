@@ -35,6 +35,7 @@ HOME = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
 
 INJECTED = re.compile(rb"CHAT LABEL untuk sesi ini = ([0-9A-Z]+)")
 LABEL_PREFIX = re.compile(r"^(\d+[A-Z]+)\b")
+LEGACY_HOOK = re.compile(r"chat[-_]label\.(sh|py)\b")
 TS = re.compile(rb'"timestamp":\s*"([^"]+)"')
 CWD = re.compile(rb'"cwd":\s*("(?:[^"\\]|\\.)*")')
 USER_LINE = re.compile(rb'"type":\s*"user"')
@@ -371,8 +372,33 @@ def await_title(inp):
         return title
 
 
+def user_settings_files():
+    env = os.environ.get("CHAT_LABEL_USER_SETTINGS")
+    if env is not None:
+        return [p for p in env.split(os.pathsep) if p]
+    return [os.path.join(HOME, name) for name in ("settings.json", "settings.local.json")]
+
+
+def hand_installed_hook():
+    """True when the user's settings already run a hand-installed copy of this hook. Both copies would
+    hand out a label for the same chat, so the plugin copy steps aside."""
+    for path in user_settings_files():
+        try:
+            with open(path) as fh:
+                events = (json.load(fh) or {}).get("hooks") or {}
+            commands = [h.get("command") or "" for groups in events.values() for g in groups or []
+                        for h in g.get("hooks") or []]
+        except (OSError, ValueError, AttributeError, TypeError):
+            continue
+        if any(LEGACY_HOOK.search(c) and "CLAUDE_PLUGIN_ROOT" not in c for c in commands):
+            return True
+    return False
+
+
 def main():
     try:
+        if "--plugin" in sys.argv[1:] and hand_installed_hook():
+            return
         inp = json.loads(sys.stdin.read() or "{}")
         os.makedirs(state_dir(), exist_ok=True)
         with open(paths()[2], "w") as lock:

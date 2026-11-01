@@ -15,6 +15,8 @@ PROJ="$WORK/projek-e2e"
 WT="$PROJ/worktrees/cabang"
 PLAIN="$WORK/nota-e2e"
 export CHAT_LABEL_STATE_DIR="$WORK/state" CHAT_LABEL_AI_WAIT=0
+# The machine running this may itself have the hook hand-installed; point the guard at no settings.
+export CHAT_LABEL_USER_SETTINGS="$WORK/no-user-settings.json"
 mkdir -p "$PROJ" "$PLAIN" "$CHAT_LABEL_STATE_DIR"
 git -C "$PROJ" init -q
 GIT_AUTHOR_DATE=2026-09-11T10:00:00 GIT_COMMITTER_DATE=2026-09-11T10:00:00 \
@@ -58,6 +60,25 @@ OUT6=$(CHAT_LABEL_AI_WAIT=3.5 run "$PROJ" "$ASK" --session-id "$SID6") || { echo
 SECS6=$(( $(date +%s) - S6 )); wait
 TITLE6=$(last_title "$SID6")
 REG="$CHAT_LABEL_STATE_DIR/chat-label-projects.json"
+cp "$REG" "$WORK/registry-part1.json"
+
+# Part 3 (runs before part 2 so the counter is known): a hand-installed copy in the user's settings AND
+# the plugin both load. The guard must leave exactly one label: the next letter, injected once.
+mkdir -p "$WORK/legacy/hooks"
+printf '#!/bin/bash\nexec python3 "%s/hooks/chat_label.py"\n' "$ROOT" > "$WORK/legacy/hooks/chat-label.sh"
+LEGACY_CMD="bash \\\"$WORK/legacy/hooks/chat-label.sh\\\""
+cat > "$WORK/legacy/settings.json" <<JSON
+{"hooks": {
+  "SessionStart": [{"hooks": [{"type": "command", "command": "$LEGACY_CMD", "timeout": 5}]}],
+  "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "$LEGACY_CMD", "timeout": 5}]}]
+}}
+JSON
+both() { (cd "$PROJ" && env -u CLAUDECODE CHAT_LABEL_USER_SETTINGS="$WORK/legacy/settings.json" claude -p "$@" --model haiku \
+          --setting-sources project --settings "$WORK/legacy/settings.json" --plugin-dir "$ROOT" --output-format json); }
+OUT7=$(both "$ASK") || { echo "hook+plugin failed: $OUT7"; exit 1; }
+SID7=$(printf '%s' "$OUT7" | field session_id)
+TITLE7=$(last_title "$SID7")
+INJECT7=$(grep "hook_additional_context" "$(transcript "$SID7")" | grep -c "untuk sesi ini = ")
 
 # Part 2: install the way a friend would, into a throwaway config dir.
 CFG="$WORK/config"
@@ -93,7 +114,12 @@ check "folder without git starts at Day 1 (1A)" 'printf "%s" "$OUT4" | field res
 check "registry: parent project only, counter 3, Day 1 = first commit" 'python3 -c "
 import json,os,sys; r=json.load(open(sys.argv[1])); p=r[os.path.realpath(sys.argv[2])]
 assert len(r)==2 and p[\"anchor\"]==\"2026-09-11\" and p[\"from\"]==\"git\" and p[\"last_index\"]==3
-assert r[os.path.realpath(sys.argv[3])][\"from\"]==\"folder\"" "$REG" "$PROJ" "$PLAIN"'
+assert r[os.path.realpath(sys.argv[3])][\"from\"]==\"folder\"" "$WORK/registry-part1.json" "$PROJ" "$PLAIN"'
+echo "  hook+plugin: title $TITLE7 | reply: $(printf '%s' "$OUT7" | field result | head -c 60) | injections $INJECT7"
+check "hand-installed hook + plugin: one label ${DAY}D, injected once, title left alone" \
+  '[ "$TITLE7" = "None" ] && [ "$INJECT7" = "1" ] && printf "%s" "$OUT7" | field result | grep -q "${DAY}D"'
+check "hand-installed hook + plugin: counter moved by exactly one (4)" \
+  'python3 -c "import json,os,sys; assert json.load(open(sys.argv[1]))[os.path.realpath(sys.argv[2])][\"last_index\"]==4" "$REG" "$PROJ"'
 echo "  install: rc $ADD_RC/$INS_RC | $(printf '%s' "$INS" | tail -1)"
 check "install: marketplace add + plugin install succeed" '[ $ADD_RC -eq 0 ] && [ $INS_RC -eq 0 ]'
 check "install: plugin listed and enabled" 'printf "%s" "$LIST" | grep -q "chat-label" && printf "%s" "$LIST" | grep -qi "enabled"'

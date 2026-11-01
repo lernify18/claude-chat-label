@@ -47,6 +47,7 @@ class Base(unittest.TestCase):
         os.environ["CHAT_LABEL_TODAY"] = "2026-10-30"
         os.environ["CHAT_LABEL_BACKUP_DIR"] = os.path.join(self.dir, "backups")
         os.environ["CHAT_LABEL_AI_WAIT"] = "0"
+        os.environ["CHAT_LABEL_USER_SETTINGS"] = os.path.join(self.dir, "settings.json")
         os.makedirs(os.environ["CHAT_LABEL_STATE_DIR"])
         self.repo = self.make_repo("projek", "2026-07-02")
 
@@ -297,6 +298,61 @@ class Prompt(Base):
     def test_broken_input_never_blocks(self):
         r = subprocess.run(HOOK_CMD, input="not json", capture_output=True, text=True, env=os.environ)
         self.assertEqual((r.returncode, r.stdout), (0, ""))
+
+
+class Guard(Base):
+    """The plugin steps aside when the user's settings already run a hand-installed copy of the hook."""
+
+    def write_settings(self, commands, name="settings.json"):
+        path = os.path.join(self.dir, name)
+        hooks = {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": c} for c in commands]}]}
+        with open(path, "w") as fh:
+            json.dump({"hooks": hooks}, fh)
+        return path
+
+    def test_hand_installed_hook_silences_the_plugin(self):
+        for cmd in ('bash "$HOME/.claude/hooks/chat-label.sh"', "python3 ~/bin/chat_label.py"):
+            self.write_settings(["afplay /System/Library/Sounds/Glass.aiff", cmd])
+            self.assertIsNone(self.prompt("s-" + cmd[:4], "x"))
+        self.assertFalse(os.path.exists(os.path.join(os.environ["CHAT_LABEL_STATE_DIR"], "chat-label-projects.json")))
+
+    def test_hand_installed_copy_itself_still_labels(self):
+        self.write_settings(['bash "$HOME/.claude/hooks/chat-label.sh"'])
+        r = subprocess.run([sys.executable, HOOK], capture_output=True, text=True, env=os.environ,
+                           input=json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": "s1", "prompt": "x",
+                                             "cwd": self.repo, "transcript_path": os.path.join(self.dir, "s1.jsonl")}))
+        self.assertIn("= 121A.", r.stdout)
+
+    def test_settings_local_json_counts_too(self):
+        local = self.write_settings(['bash "$HOME/.claude/hooks/chat-label.sh"'], "settings.local.json")
+        os.environ["CHAT_LABEL_USER_SETTINGS"] = os.pathsep.join([os.path.join(self.dir, "settings.json"), local])
+        self.assertIsNone(self.prompt("s1", "x"))
+
+    def test_plugin_runs_when_settings_have_no_copy(self):
+        self.write_settings(["afplay /System/Library/Sounds/Glass.aiff",
+                             'python3 "${CLAUDE_PLUGIN_ROOT}/hooks/chat_label.py" --plugin',
+                             "python3 ~/.claude/tools/chat-label-backfill.py --semula"])
+        self.assertEqual(self.label("s1", "x"), "121A")
+
+    def test_broken_or_odd_settings_never_block(self):
+        for body in ("{not json", "[]", '{"hooks": {"Stop": null}}', '{"hooks": {"Stop": [{"hooks": [null]}]}}'):
+            with open(os.path.join(self.dir, "settings.json"), "w") as fh:
+                fh.write(body)
+            r = subprocess.run(HOOK_CMD, capture_output=True, text=True, env=os.environ,
+                               input=json.dumps({"hook_event_name": "UserPromptSubmit", "session_id": body, "prompt": "x",
+                                                 "cwd": self.repo, "transcript_path": "/nope"}))
+            self.assertEqual((r.returncode, r.stderr), (0, ""), body)
+            self.assertIn("CHAT LABEL untuk sesi ini", r.stdout, body)
+
+    def test_reads_settings_from_the_claude_config_dir(self):
+        os.environ.pop("CHAT_LABEL_USER_SETTINGS")
+        cfg = os.path.join(self.dir, "cfg")
+        os.makedirs(cfg)
+        with open(os.path.join(cfg, "settings.json"), "w") as fh:
+            json.dump({"hooks": {"SessionStart": [{"hooks": [{"command": "bash ~/.claude/hooks/chat-label.sh"}]}]}}, fh)
+        os.environ["CLAUDE_CONFIG_DIR"] = cfg
+        self.addCleanup(os.environ.pop, "CLAUDE_CONFIG_DIR")
+        self.assertIsNone(self.prompt("s1", "x"))
 
 
 if __name__ == "__main__":
