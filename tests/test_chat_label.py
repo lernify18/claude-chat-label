@@ -15,6 +15,7 @@ import unittest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(ROOT, "hooks", "chat_label.py")
 HOOK_CMD = [sys.executable, HOOK, "--plugin"]
+BACKFILL = os.path.join(ROOT, "scripts", "chat-label-backfill.py")
 spec = importlib.util.spec_from_file_location("chat_label", HOOK)
 cl = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(cl)
@@ -353,6 +354,163 @@ class Guard(Base):
         os.environ["CLAUDE_CONFIG_DIR"] = cfg
         self.addCleanup(os.environ.pop, "CLAUDE_CONFIG_DIR")
         self.assertIsNone(self.prompt("s1", "x"))
+
+
+class BackfillBase(Base):
+    def setUp(self):
+        super().setUp()
+        self.proj = os.path.join(self.dir, "proj")
+        os.makedirs(self.proj)
+        reg = os.path.join(self.dir, "registry")
+        os.makedirs(reg)
+        os.environ["CHAT_LABEL_SESSIONS_REGISTRY"] = reg
+        with open(os.path.join(reg, "1.json"), "w") as fh:
+            json.dump({"pid": os.getpid(), "sessionId": "live"}, fh)
+        write_jsonl(os.path.join(self.proj, "old.jsonl"), [injected("11027", "2026-10-19T03:00:00.000Z"), user("x"),
+                    {"type": "ai-title", "aiTitle": "Isu emel", "sessionId": "old"}])
+        write_jsonl(os.path.join(self.proj, "snip.jsonl"), [injected("110B", "2026-10-19T04:00:00.000Z"), user("boleh semak order 123")])
+        write_jsonl(os.path.join(self.proj, "named.jsonl"), [injected("110C"), {"type": "custom-title", "customTitle": "31A - x"}])
+        write_jsonl(os.path.join(self.proj, "live.jsonl"), [injected("121D"), {"type": "ai-title", "aiTitle": "Y"}])
+        write_jsonl(os.path.join(self.proj, "empty.jsonl"), [injected("110E")])
+        self.addCleanup(os.environ.pop, "CHAT_LABEL_SESSIONS_REGISTRY")
+
+    def backfill(self, *args):
+        r = subprocess.run([sys.executable, BACKFILL, *args], capture_output=True, text=True, env=os.environ)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout
+
+    def last_custom(self, name):
+        return cl.scan(os.path.join(self.proj, name + ".jsonl"))["custom"]
+
+
+class Backfill(BackfillBase):
+    def test_dry_run_writes_nothing(self):
+        out = self.backfill(self.proj)
+        self.assertIn("akan dilabel: 2", out)
+        self.assertIn("dinamakan 1, terbuka 1, tiada label asal 0, kosong 1", out)
+        self.assertIsNone(self.last_custom("old"))
+
+    def test_apply_then_undo(self):
+        before = open(os.path.join(self.proj, "old.jsonl"), "rb").read()
+        out = self.backfill(self.proj, "--apply")
+        self.assertTrue(manifest_in(out).startswith(self.dir))
+        manifest = manifest_in(out)
+        self.assertEqual(self.last_custom("old"), "110AA. Isu emel")
+        self.assertEqual(self.last_custom("snip"), "110B. boleh semak order 123")
+        self.assertEqual(self.last_custom("named"), "31A - x")
+        self.assertIsNone(self.last_custom("live"))
+        sessions = json.load(open(os.path.join(os.environ["CHAT_LABEL_STATE_DIR"], "chat-label-sessions.json")))
+        self.assertEqual(sessions["snip"]["source"], "prompt")
+        self.assertIn("dibuang 2 baris", self.backfill("--undo", manifest))
+        self.assertEqual(open(os.path.join(self.proj, "old.jsonl"), "rb").read(), before)
+
+
+
+class TanpaLabel(BackfillBase):
+    def setUp(self):
+        super().setUp()
+        self.chats = os.path.join(self.dir, "projects", "p")
+        os.makedirs(self.chats)
+        os.environ["CHAT_LABEL_PROJECTS_DIR"] = os.path.dirname(self.chats)
+        os.environ["CHAT_LABEL_TEST_CWD"] = "/ujian-sementara/"
+        self.addCleanup(os.environ.pop, "CHAT_LABEL_PROJECTS_DIR")
+        self.addCleanup(os.environ.pop, "CHAT_LABEL_TEST_CWD")
+        self.hr = self.make_repo("hr", "2026-09-11")
+        self.late = self.make_repo("lewat", "2026-10-25")
+        day = "2026-10-30T0%d:00:00.000Z"
+        self.chat("a", self.repo, day % 1, [injected("121D", day % 1), {"type": "ai-title", "aiTitle": "Penjualan"}])
+        self.chat("b", self.repo, day % 2, [{"type": "ai-title", "aiTitle": "Isu kerap"}])
+        self.chat("c", self.repo, day % 3, [{"type": "custom-title", "customTitle": "121A - lama"}])
+        self.chat("d", self.repo, day % 4, [{"type": "custom-title", "customTitle": "TBR - nota"}])
+        self.chat("e", self.repo, day % 5, [{"type": "custom-title", "customTitle": "31L V - toot"}])
+        self.chat("f", self.repo, day % 6, [{"type": "custom-title", "customTitle": "Publish Cloudflare"}])
+        self.chat("g", self.hr, day % 7, [injected("121F", day % 7), {"type": "ai-title", "aiTitle": "Kehadiran"}])
+        self.chat("h", "/ujian-sementara/x", day % 8, [])
+        self.chat("i", self.late, "2026-10-20T02:00:00.000Z", [])
+        write_jsonl(os.path.join(self.chats, "kosong.jsonl"), [injected("121Z")])
+
+    def chat(self, sid, cwd, ts, rows):
+        first = dict(user("mula " + sid, ts), cwd=cwd)
+        write_jsonl(os.path.join(self.chats, sid + ".jsonl"), [first] + rows)
+
+    def title(self, sid):
+        return cl.scan(os.path.join(self.chats, sid + ".jsonl"))["custom"]
+
+    def test_dry_run_lists_only_unlabelled_and_writes_nothing(self):
+        out = self.backfill("--tanpa-label")
+        self.assertIn("akan dilabel: 5 · langkau: berlabel 3, terbuka 0, kosong 1, ujian 1", out)
+        self.assertIsNone(self.title("a"))
+        self.assertFalse(os.path.exists(os.path.join(os.environ["CHAT_LABEL_STATE_DIR"], "chat-label-projects.json")))
+
+    def test_apply_labels_per_project_keeps_the_rest_then_undo(self):
+        before = open(os.path.join(self.chats, "f.jsonl"), "rb").read()
+        manifest = manifest_in(self.backfill("--tanpa-label", "--apply"))
+        self.assertEqual(self.title("a"), "121D. Penjualan")
+        self.assertEqual(self.title("b"), "121B. Isu kerap")
+        self.assertEqual(self.title("f"), "121C. Publish Cloudflare")
+        self.assertEqual(self.title("g"), "50A. Kehadiran")
+        self.assertEqual(self.title("i"), "1A. mula i")
+        self.assertEqual([self.title(x) for x in "cde"], ["121A - lama", "TBR - nota", "31L V - toot"])
+        self.assertIsNone(self.title("h"))
+        reg = self.projects()
+        self.assertEqual((reg[self.repo]["anchor"], reg[self.repo]["last_index"]), ("2026-07-02", 4))
+        self.assertEqual((reg[self.late]["anchor"], reg[self.late]["from"]), ("2026-10-20", "chat"))
+        sessions = json.load(open(os.path.join(os.environ["CHAT_LABEL_STATE_DIR"], "chat-label-sessions.json")))
+        self.assertEqual(sessions["f"]["source"], "user")
+        self.assertEqual(self.label("baru", "x"), "121E")
+        self.assertIn("dibuang 5 baris", self.backfill("--undo", manifest))
+        self.assertEqual(open(os.path.join(self.chats, "f.jsonl"), "rb").read(), before)
+
+class Semula(TanpaLabel):
+    def test_dry_run_relabels_everything_and_writes_nothing(self):
+        out = self.backfill("--semula")
+        self.assertIn("akan dilabel semula: 8 (terbuka 0) · langkau: kosong 1, ujian 1, sama 0", out)
+        self.assertEqual(self.title("c"), "121A - lama")
+
+    def test_apply_renumbers_per_project_uses_ai_title_converts_markers_then_undo(self):
+        write_jsonl(os.path.join(self.chats, "live.jsonl"), [dict(user("buka", "2026-10-30T09:30:00.000Z"), cwd=self.repo)])
+        before = open(os.path.join(self.chats, "d.jsonl"), "rb").read()
+        out = self.backfill("--semula", "--apply")
+        manifest = manifest_in(out)
+        self.assertEqual([self.title(x) for x in "abcdef"], ["121A. Penjualan", "121B. Isu kerap", "121C. lama",
+                                                             "121D. nota", "121E. toot", "121F. Publish Cloudflare"])
+        self.assertEqual(self.title("g"), "50A. Kehadiran")
+        self.assertEqual(self.title("i"), "1A. mula i")
+        self.assertIsNone(self.title("h"))
+        self.assertIsNone(self.title("live"))
+        sessions = json.load(open(os.path.join(os.environ["CHAT_LABEL_STATE_DIR"], "chat-label-sessions.json")))
+        self.assertEqual((sessions["live"]["source"], sessions["live"]["title"]), ("relabel", "121G. buka"))
+        self.assertEqual(sessions["d"]["source"], "prompt")
+        rows = list(csv.reader(open(os.path.join(os.path.dirname(manifest), "relabel-map.csv"))))
+        self.assertEqual(rows[0][:5], ["session", "projek", "tarikh", "label_lama", "label_baru"])
+        self.assertIn(["c", "projek", "2026-10-30", "121A", "121C", "121A - lama", "121C. lama", ""], rows)
+        self.assertEqual(self.projects()[self.repo]["last_index"], 7)
+        self.assertIn("akan dilabel semula: 1 (terbuka 1)", self.backfill("--semula"))
+        self.backfill("--undo", manifest)
+        self.assertEqual(open(os.path.join(self.chats, "d.jsonl"), "rb").read(), before)
+        self.assertNotIn("live", json.load(open(os.path.join(os.environ["CHAT_LABEL_STATE_DIR"], "chat-label-sessions.json"))))
+
+    def test_today_counter_continues_after_relabel(self):
+        os.environ["CHAT_LABEL_TODAY"] = "2026-10-30"
+        self.backfill("--semula", "--apply")
+        self.assertEqual(self.projects()[self.repo]["last_index"], 6)
+        self.assertEqual(self.label("baru", "x"), "121G")
+
+
+class BackfillPluginArgs(TanpaLabel):
+    def test_ringkas_caps_examples_and_undo_works_after_other_flags(self):
+        for i in range(12):
+            self.chat("x%02d" % i, self.repo, "2026-10-29T0%d:00:00.000Z" % (i % 10), [])
+        out = self.backfill("--tanpa-label", "--ringkas")
+        self.assertIn("… dan 7 lagi", out)
+        self.assertEqual(len([ln for ln in out.splitlines() if ln[:8].strip() and "  " in ln and not ln.startswith(("…", "akan"))]), 10)
+        manifest = manifest_in(self.backfill("--tanpa-label", "--ringkas", "--apply"))
+        self.assertIn("dibuang 17 baris", self.backfill("--tanpa-label", "--undo", manifest))
+
+    def test_undo_without_manifest_explains_and_writes_nothing(self):
+        r = subprocess.run([sys.executable, BACKFILL, "--tanpa-label", "--undo"], capture_output=True, text=True, env=os.environ)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("--undo <manifest.json>", r.stdout)
 
 
 if __name__ == "__main__":
