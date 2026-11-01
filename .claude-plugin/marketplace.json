@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-chat-label",
+  "description": "Auto chat-tab labels for Claude Code.",
+  "owner": {
+    "name": "lernify18",
+    "url": "https://github.com/lernify18"
+  },
+  "plugins": [
+    {
+      "name": "chat-label",
+      "description": "Labels every Claude Code chat tab `<day><letter>. <title>`, counted per project.",
+      "version": "1.0.0",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}

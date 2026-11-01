@@ -1,0 +1,13 @@
+{
+  "name": "chat-label",
+  "version": "1.0.0",
+  "description": "Labels every Claude Code chat tab `<day><letter>. <title>` (e.g. `12A. Fix login bug`), counted per project, so old chats are easy to find.",
+  "author": {
+    "name": "lernify18",
+    "url": "https://github.com/lernify18"
+  },
+  "homepage": "https://github.com/lernify18/claude-chat-label",
+  "repository": "https://github.com/lernify18/claude-chat-label",
+  "license": "MIT",
+  "keywords": ["chat", "label", "tabs", "sessions", "hooks"]
+}
