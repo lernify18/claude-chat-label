@@ -1,0 +1,27 @@
+{
+  "description": "Gives each chat a `<day><letter>.` label on its first prompt and keeps the tab title as `<label>. <title>`.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/chat_label.py\" --plugin",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/chat_label.py\" --plugin",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
