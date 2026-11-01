@@ -10,8 +10,11 @@ UserPromptSubmit: the first prompt gives the chat its label. Any custom title st
 generating its own AI title, so in the IDE the hook first waits (lock released, CHAT_LABEL_AI_WAIT s,
 default 3.5; the hook timeout is 5) for the AI title the extension requests at the same moment, then sets
 `<label>. <AI title>` through hookSpecificOutput.sessionTitle (same as /rename); no AI title in time =
-`<label>. <first prompt text>`. Outside the IDE nothing generates a title, so there is no wait: the next
-prompt sets it. A title the user set by hand is never touched.
+`<label>. <first prompt text>`. In the IDE that is what happens: the transcript, AI title included, is
+written only after this hook returns. So the hook then starts a detached follower (--follow) that puts
+`<label>. <AI title>` in the transcript once it appears, and Claude Code adopts it (see follow()).
+Outside the IDE nothing generates a title, so there is no wait: the next prompt sets it.
+A title the user set by hand is never touched.
 SessionStart (resume/compact): re-injects the label and, for a chat still waiting, sets the title.
 A chat relabelled by chat-label-backfill.py --semula while it was open (source "relabel") gets its new
 title on its next prompt, since Claude Code would rewrite an appended title from memory.
@@ -309,7 +312,8 @@ def on_prompt(inp):
             remember(sessions, sid, entry["label"], "ai" if t["ai"] else "prompt", title)
         save_json(sessions_path, sessions)
         return {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "sessionTitle": title}} if title else None
-    if t["custom"] and t["custom"] != entry["title"]:
+    followed = t["ai"] and t["custom"] == titled(entry["label"], t["ai"])
+    if t["custom"] and t["custom"] != entry["title"] and not followed:
         entry["source"] = "user"
         save_json(sessions_path, sessions)
         return None
@@ -368,8 +372,112 @@ def await_title(inp):
         title = settle(sessions, sid, entry, t)
         if title:
             remember(sessions, sid, entry["label"], "ai" if t["ai"] else "prompt", title)
+            if not t["ai"]:
+                spawn_follower(sid, inp.get("transcript_path"), entry["label"], title)
         save_json(sessions_path, sessions)
         return title
+
+
+TAIL = 65536  # Claude Code re-reads this much of the transcript's end whenever it re-appends session metadata
+
+
+def spawn_follower(sid, path, label, old):
+    if not path or os.environ.get("CHAT_LABEL_FOLLOW") == "0":
+        return
+    subprocess.Popen([sys.executable, os.path.abspath(__file__), "--follow", sid, path, label, old],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True, close_fds=True)
+
+
+def follow_log(sid, msg):
+    with open(os.path.join(state_dir(), "chat-label-follow.log"), "a") as fh:
+        fh.write("%s %s %s\n" % (datetime.datetime.now().isoformat(timespec="seconds"), sid[:8], msg))
+
+
+def customs(data):
+    out = []
+    for line in data.split(b"\n"):
+        if b'"custom-title"' in line:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if d.get("type") == "custom-title":
+                out.append(d.get("customTitle"))
+    return out
+
+
+def read_from(path, offset):
+    with open(path, "rb") as fh:
+        fh.seek(max(0, offset))
+        return fh.read()
+
+
+def append_title(path, sid, title):
+    """Same two lines Claude Code writes for a hook title. Returns the offset just past them."""
+    rows = [{"type": "custom-title", "customTitle": title, "sessionId": sid},
+            {"type": "agent-name", "agentName": title, "sessionId": sid}]
+    data = "".join(json.dumps(r, ensure_ascii=False, separators=(",", ":")) + "\n" for r in rows).encode()
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND)
+    try:
+        os.write(fd, data)
+        return os.lseek(fd, 0, os.SEEK_CUR)
+    finally:
+        os.close(fd)
+
+
+def follow(sid, path, label, old):
+    """Detached from the first prompt's hook. The IDE writes the transcript, AI title included, only after
+    that hook returns, so the hook could only set `<label>. <prompt>`. This puts `<label>. <AI title>` in
+    the file: Claude Code adopts the last custom-title in the file's last 64 KB whenever it re-appends
+    session metadata (after every 32 KB it writes, and at exit), and the tab follows. If it writes the old
+    title back, append again; any other title is a rename by hand, so stop."""
+    poll = float(os.environ.get("CHAT_LABEL_FOLLOW_POLL", "1"))
+    start = time.time()
+    end = start + float(os.environ.get("CHAT_LABEL_FOLLOW_MAX", "900"))
+    ai = None
+    while time.time() < start + 60 and os.path.isdir(os.path.dirname(path)):
+        ai = os.path.isfile(path) and scan(path)["ai"]
+        if ai:
+            break
+        time.sleep(poll)
+    if not ai:
+        return follow_log(sid, "no AI title")
+    want = titled(label, ai)
+    offset, writes = None, 0
+    while time.time() < end and os.path.isfile(path):
+        if offset is not None:
+            seen = customs(read_from(path, offset))
+            if seen and seen[-1] == want:
+                with open(paths()[2], "w") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    sessions = load_sessions(paths()[1])
+                    entry = sessions.get(sid)
+                    if entry and (entry.get("source"), entry.get("title")) == ("prompt", old):
+                        remember(sessions, sid, label, "ai", want, entry.get("first"))
+                        save_json(paths()[1], sessions)
+                return follow_log(sid, "adopted after %d write(s): %s" % (writes, want))
+            if seen and seen[-1] != old:
+                return follow_log(sid, "stopped, another title: %s" % seen[-1])
+            if not seen:
+                time.sleep(poll)
+                continue
+        if writes >= 5:
+            return follow_log(sid, "stopped after 5 writes, Claude Code keeps writing the old title back")
+        with open(paths()[2], "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            entry = load_sessions(paths()[1]).get(sid) or {}
+            if (entry.get("source"), entry.get("title")) not in (("prompt", old), ("ai", want)):
+                return follow_log(sid, "stopped, session map changed")
+            tail = read_from(path, os.path.getsize(path) - TAIL)
+            current = customs(tail)
+            if current and current[-1] not in (old, want):
+                return follow_log(sid, "stopped, another title: %s" % current[-1])
+            if tail.endswith(b"\n"):
+                offset = append_title(path, sid, want)
+                writes += 1
+        time.sleep(poll)
+    follow_log(sid, "timed out, %d write(s)" % writes)
 
 
 def user_settings_files():
@@ -396,6 +504,12 @@ def hand_installed_hook():
 
 
 def main():
+    if len(sys.argv) == 6 and sys.argv[1] == "--follow":
+        try:
+            follow(*sys.argv[2:])
+        except Exception as exc:
+            follow_log(sys.argv[2], "error: %s" % exc)
+        return
     try:
         if "--plugin" in sys.argv[1:] and hand_installed_hook():
             return

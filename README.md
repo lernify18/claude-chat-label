@@ -40,7 +40,7 @@ claude plugin install chat-label@claude-chat-label
 
 | Di mana | Prompt pertama | Prompt kedua |
 |---|---|---|
-| VS Code / Antigravity / Cursor | `12A. <tajuk Claude Code>` terus muncul | — |
+| VS Code / Antigravity / Cursor | `12A. <ayat prompt pertama>` terus muncul, kemudian bertukar sendiri ke `12A. <tajuk Claude Code>` | — |
 | Terminal (`claude`) | Claude tahu labelnya, tajuk belum berubah | `12A. <ayat prompt pertama>` |
 
 Claude sendiri pun tahu label chatnya, jadi anda boleh tanya «chat 12A tadi buat apa?».
@@ -88,9 +88,13 @@ pada kali pertama digunakan. Tukar `anchor` projek itu (format `YYYY-MM-DD`) dan
 **Data saya dihantar ke mana-mana?** Tidak. Semuanya berjalan di komputer anda: plugin hanya membaca transkrip
 chat dalam `~/.claude/projects/` dan menulis label ke dalamnya. Tiada rangkaian.
 
-**Tab di VS Code tak sempat dapat tajuk pada prompt pertama.** Hook menunggu tajuk Claude Code sehingga 3.5 saat.
-Kalau tajuk lambat sampai, ayat prompt pertama digunakan dulu, dan tajuk sebenar menggantinya pada prompt
-seterusnya.
+**Tab di VS Code tunjuk ayat prompt saya dulu, bukan tajuk Claude Code.** Itu normal untuk beberapa saat. Claude
+Code hanya menulis fail chat selepas hook prompt pertama siap, jadi hook belum boleh baca tajuknya. Label
+diletak dulu bersama ayat prompt anda, kemudian satu proses kecil di latar belakang menulis
+`12A. <tajuk Claude Code>` sebaik fail chat wujud, dan Claude Code mengambilnya. Tab biasanya bertukar semasa
+jawapan pertama. Paling lewat, ia bertukar pada prompt seterusnya atau bila chat ditutup. Kalau tak bertukar
+langsung, lihat `~/.claude/chat-label-follow.log`. Kalau anda namakan semula tab sendiri, proses itu berhenti
+dan tidak mengusik nama anda.
 
 ## Buang
 
@@ -99,7 +103,8 @@ seterusnya.
 ```
 
 Label yang sudah ditulis kekal pada chat. Fail state plugin ialah `~/.claude/chat-label-projects.json`,
-`chat-label-sessions.json` dan `chat-label.lock`; padam fail-fail itu kalau mahu bersih sepenuhnya.
+`chat-label-sessions.json`, `chat-label.lock` dan `chat-label-follow.log`; padam fail-fail itu kalau mahu bersih
+sepenuhnya.
 
 ---
 
@@ -107,7 +112,9 @@ Label yang sudah ditulis kekal pada chat. Fail state plugin ialah `~/.claude/cha
 
 Labels every Claude Code chat tab `<day><letter>. <title>` (e.g. `12A. Fix login bug`), counted per project:
 the day since the project's first commit, and a letter for which chat of that day it is. The title is Claude
-Code's own AI title, and chats you renamed by hand are never touched.
+Code's own AI title, and chats you renamed by hand are never touched. In the editor the tab first shows
+`12A. <your first prompt>`, then switches to `12A. <Claude Code's title>` on its own (usually during the first
+reply), because Claude Code writes the chat file only after the first prompt's hook has returned.
 
 ```
 /plugin marketplace add lernify18/claude-chat-label
