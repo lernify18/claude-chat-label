@@ -51,14 +51,23 @@ OUT4=$(run "$PLAIN" "$ASK") || { echo "no-git folder failed: $OUT4"; exit 1; }
 TITLE4=$(last_title "$(printf '%s' "$OUT4" | field session_id)")
 OUT5=$(run "$WT" "Ulang CHAT LABEL sesi ini sahaja." --resume "$SID3") || { echo "worktree resume failed: $OUT5"; exit 1; }
 TITLE5=$(last_title "$SID3")
-# Like the IDE: the extension asks for an AI title together with the prompt; it lands ~1 s later.
+# Like the IDE: Claude Code holds the AI title in memory but writes the transcript only AFTER the first
+# prompt's hook returns, so the hook sets <label>. <prompt> and the detached follower writes
+# <label>. <AI title>. -p generates no AI title, so the ai-title line is appended as soon as the file
+# exists, the way the IDE writes it.
 SID6=$(python3 -c "import uuid; print(uuid.uuid4())")
 T6="$HOME/.claude/projects/$(printf '%s' "$(cd "$PROJ" && pwd -P)" | sed 's#[^A-Za-z0-9]#-#g')/$SID6.jsonl"
-( sleep 1; mkdir -p "$(dirname "$T6")"; printf '{"type":"ai-title","aiTitle":"Tajuk asal IDE","sessionId":"%s"}\n' "$SID6" >> "$T6" ) &
-S6=$(date +%s)
-OUT6=$(CHAT_LABEL_AI_WAIT=3.5 run "$PROJ" "$ASK" --session-id "$SID6") || { echo "IDE mode failed: $OUT6"; exit 1; }
-SECS6=$(( $(date +%s) - S6 )); wait
+( for _ in $(seq 300); do [ -f "$T6" ] && break; sleep 0.1; done
+  printf '{"type":"ai-title","aiTitle":"Tajuk asal IDE","sessionId":"%s"}\n' "$SID6" >> "$T6" ) &
+OUT6=$(CHAT_LABEL_AI_WAIT=3.5 CHAT_LABEL_FOLLOW_POLL=0.2 run "$PROJ" \
+  "Run the Bash command 'sleep 4' first, then reply with this session's CHAT LABEL only." \
+  --session-id "$SID6" --allowedTools "Bash(sleep 4)") || { echo "IDE mode failed: $OUT6"; exit 1; }
+wait
+LOG6="$CHAT_LABEL_STATE_DIR/chat-label-follow.log"
+for _ in $(seq 50); do grep -q "${SID6:0:8} " "$LOG6" 2>/dev/null && break; sleep 0.2; done
 TITLE6=$(last_title "$SID6")
+WANT6="${DAY}C. Tajuk asal IDE"
+COUNT6=$(grep -c "\"customTitle\":\"$WANT6\"" "$T6")
 REG="$CHAT_LABEL_STATE_DIR/chat-label-projects.json"
 cp "$REG" "$WORK/registry-part1.json"
 
@@ -109,7 +118,9 @@ check "second prompt: tab = ${DAY}A. <AI title>" '[ "$TITLE2" = "${DAY}A. Semak 
 check "resume keeps the same label (SessionStart)" 'printf "%s" "$OUT2" | field result | grep -q "${DAY}A"'
 check "worktree continues the parent project counter (${DAY}B)" '[ "$TITLE3" = "None" ] && printf "%s" "$OUT3" | field result | grep -q "${DAY}B"'
 check "no AI title: second prompt uses the first prompt text" '[ "$TITLE5" = "${DAY}B. Apakah CHAT LABEL untuk sesi ini? Balas label itu…" ]'
-check "IDE mode: first prompt gets ${DAY}C. <AI title> straight away (${SECS6}s)" '[ "$TITLE6" = "${DAY}C. Tajuk asal IDE" ]'
+check "IDE mode: label on the first prompt (${DAY}C)" 'printf "%s" "$OUT6" | field result | grep -q "${DAY}C"'
+check "IDE mode: final title = $WANT6 (follower), not the prompt text" '[ "$TITLE6" = "$WANT6" ]'
+check "IDE mode: Claude Code itself wrote the follower's title back (adopted, $COUNT6 lines)" '[ "$COUNT6" -ge 2 ] && grep -q "${SID6:0:8} adopted" "$LOG6"'
 check "folder without git starts at Day 1 (1A)" 'printf "%s" "$OUT4" | field result | grep -q "1A"'
 check "registry: parent project only, counter 3, Day 1 = first commit" 'python3 -c "
 import json,os,sys; r=json.load(open(sys.argv[1])); p=r[os.path.realpath(sys.argv[2])]

@@ -48,6 +48,7 @@ class Base(unittest.TestCase):
         os.environ["CHAT_LABEL_TODAY"] = "2026-10-30"
         os.environ["CHAT_LABEL_BACKUP_DIR"] = os.path.join(self.dir, "backups")
         os.environ["CHAT_LABEL_AI_WAIT"] = "0"
+        os.environ["CHAT_LABEL_FOLLOW"] = "0"
         os.environ["CHAT_LABEL_USER_SETTINGS"] = os.path.join(self.dir, "settings.json")
         os.makedirs(os.environ["CHAT_LABEL_STATE_DIR"])
         self.repo = self.make_repo("projek", "2026-07-02")
@@ -299,6 +300,114 @@ class Prompt(Base):
     def test_broken_input_never_blocks(self):
         r = subprocess.run(HOOK_CMD, input="not json", capture_output=True, text=True, env=os.environ)
         self.assertEqual((r.returncode, r.stdout), (0, ""))
+
+
+def titles_in(path):
+    with open(path, "rb") as fh:
+        return cl.customs(fh.read())
+
+
+class FakeClaudeCode(threading.Thread):
+    """Re-appends session metadata the way Claude Code does: each time the follower writes `want`, the
+    next re-append writes back whatever `replies` says (want = adopted, old = written from memory)."""
+
+    def __init__(self, path, sid, want, replies):
+        super().__init__(daemon=True)
+        self.path, self.sid, self.want, self.replies = path, sid, want, list(replies)
+        self.answered = 0
+
+    def run(self):
+        mine, end = 0, time.time() + 8
+        while self.replies and time.time() < end:
+            if titles_in(self.path).count(self.want) - mine > self.answered:
+                reply = self.replies.pop(0)
+                with open(self.path, "a") as fh:
+                    fh.write(json.dumps({"type": "custom-title", "customTitle": reply, "sessionId": self.sid}) + "\n")
+                mine += reply == self.want
+                self.answered += 1
+            time.sleep(0.02)
+
+
+class Follow(Base):
+    OLD = "121A. help export orders"
+    WANT = "121A. Export orders to CSV"
+
+    def setUp(self):
+        super().setUp()
+        os.environ["CHAT_LABEL_FOLLOW"] = "1"
+        os.environ["CHAT_LABEL_FOLLOW_POLL"] = "0.05"
+        os.environ["CHAT_LABEL_FOLLOW_MAX"] = "6"
+        self.addCleanup(os.environ.pop, "CHAT_LABEL_FOLLOW_POLL")
+        self.addCleanup(os.environ.pop, "CHAT_LABEL_FOLLOW_MAX")
+        self.t = os.path.join(self.dir, "s1.jsonl")
+
+    def materialize(self):
+        """What the IDE writes once the first prompt's hook has returned."""
+        write_jsonl(self.t, [{"type": "custom-title", "customTitle": self.OLD, "sessionId": "s1"},
+                             {"type": "ai-title", "aiTitle": "Export orders to CSV", "sessionId": "s1"},
+                             user("help export orders")])
+
+    def ide_first_prompt(self):
+        os.environ["CHAT_LABEL_AI_WAIT"] = "0.3"
+        out = self.prompt("s1", "help export orders", self.t)
+        self.assertEqual(out["sessionTitle"], self.OLD)
+
+    def entry(self):
+        with open(os.path.join(os.environ["CHAT_LABEL_STATE_DIR"], "chat-label-sessions.json")) as fh:
+            return json.load(fh)["s1"]
+
+    def wait_log(self, needle, secs=7):
+        path = os.path.join(os.environ["CHAT_LABEL_STATE_DIR"], "chat-label-follow.log")
+        end = time.time() + secs
+        while time.time() < end:
+            try:
+                with open(path) as fh:
+                    if needle in fh.read():
+                        return
+            except OSError:
+                pass
+            time.sleep(0.05)
+        self.fail("log has no %r" % needle)
+
+    def test_first_prompt_label_then_ai_title_once_claude_code_adopts_it(self):
+        self.ide_first_prompt()
+        self.materialize()
+        FakeClaudeCode(self.t, "s1", self.WANT, [self.WANT]).start()
+        self.wait_log("adopted after 1 write(s)")
+        self.assertEqual(titles_in(self.t)[-1], self.WANT)
+        self.assertEqual((self.entry()["source"], self.entry()["title"]), ("ai", self.WANT))
+        self.assertIsNone(self.prompt("s1", "more", self.t))
+
+    def test_writes_again_when_claude_code_puts_the_old_title_back(self):
+        self.ide_first_prompt()
+        self.materialize()
+        FakeClaudeCode(self.t, "s1", self.WANT, [self.OLD, self.WANT]).start()
+        self.wait_log("adopted after 2 write(s)")
+        self.assertEqual(titles_in(self.t)[-1], self.WANT)
+
+    def test_stops_at_a_rename_by_hand(self):
+        self.ide_first_prompt()
+        self.materialize()
+        FakeClaudeCode(self.t, "s1", self.WANT, ["My own name"]).start()
+        self.wait_log("stopped, another title: My own name")
+        self.assertEqual(titles_in(self.t)[-1], "My own name")
+        self.assertEqual(self.entry()["source"], "prompt")
+
+    def test_no_ai_title_writes_nothing(self):
+        self.ide_first_prompt()
+        write_jsonl(self.t, [{"type": "custom-title", "customTitle": self.OLD, "sessionId": "s1"}, user("x")])
+        time.sleep(0.5)
+        self.assertEqual(titles_in(self.t), [self.OLD])
+
+    def test_second_prompt_takes_the_followers_title_as_its_own(self):
+        state = os.path.join(os.environ["CHAT_LABEL_STATE_DIR"], "chat-label-sessions.json")
+        with open(state, "w") as fh:
+            json.dump({"s1": {"label": "121A", "source": "prompt", "title": self.OLD, "date": "2026-10-30"}}, fh)
+        self.materialize()
+        with open(self.t, "a") as fh:
+            fh.write(json.dumps({"type": "custom-title", "customTitle": self.WANT, "sessionId": "s1"}) + "\n")
+        self.assertEqual(self.prompt("s1", "more", self.t)["sessionTitle"], self.WANT)
+        self.assertEqual(self.entry()["source"], "ai")
 
 
 class Guard(Base):
